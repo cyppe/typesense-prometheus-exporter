@@ -4,7 +4,10 @@ use std::sync::Arc;
 use crate::{
     cli::CliArgs,
     typesense::models::{
-        typesense_metrics_model::TypesenseMetrics, typesense_stats_model::TypesenseStats,
+        typesense_metrics_model::TypesenseMetrics,
+        typesense_stats_model::TypesenseStats,
+        typesense_health_model::TypesenseHealth,
+        typesense_debug_model::TypesenseDebug,
     },
 };
 use prometheus::{register_gauge_vec_with_registry, Encoder, Registry, TextEncoder};
@@ -13,6 +16,8 @@ use regex::Regex;
 pub(crate) async fn generate_metrics(
     ts_metrics: TypesenseMetrics,
     ts_stats: TypesenseStats,
+    ts_health: TypesenseHealth,
+    ts_debug: TypesenseDebug,
     cli_args: Arc<CliArgs>,
 ) -> String {
     let registry = Registry::new();
@@ -25,54 +30,18 @@ pub(crate) async fn generate_metrics(
     )
     .unwrap();
 
-    typesense_metrics
-        .with_label_values(&[
-            &cli_args.typesense_host,
-            &cli_args.typesense_port.to_string(),
-            "system_cpu1_active_percentage",
-        ])
-        .set(
-            ts_metrics
-                .system_cpu1_active_percentage
-                .parse()
-                .unwrap_or(0.0),
-        );
-    typesense_metrics
-        .with_label_values(&[
-            &cli_args.typesense_host,
-            &cli_args.typesense_port.to_string(),
-            "system_cpu3_active_percentage",
-        ])
-        .set(
-            ts_metrics
-                .system_cpu3_active_percentage
-                .parse()
-                .unwrap_or(0.0),
-        );
-    typesense_metrics
-        .with_label_values(&[
-            &cli_args.typesense_host,
-            &cli_args.typesense_port.to_string(),
-            "system_cpu2_active_percentage",
-        ])
-        .set(
-            ts_metrics
-                .system_cpu2_active_percentage
-                .parse()
-                .unwrap_or(0.0),
-        );
-    typesense_metrics
-        .with_label_values(&[
-            &cli_args.typesense_host,
-            &cli_args.typesense_port.to_string(),
-            "system_cpu4_active_percentage",
-        ])
-        .set(
-            ts_metrics
-                .system_cpu4_active_percentage
-                .parse()
-                .unwrap_or(0.0),
-        );
+    // Export all CPU percentage metrics dynamically
+    for (key, value) in ts_metrics.get_cpu_percentages() {
+        typesense_metrics
+            .with_label_values(&[
+                &cli_args.typesense_host,
+                &cli_args.typesense_port.to_string(),
+                &key,
+            ])
+            .set(value);
+    }
+
+    // Aggregate CPU percentage
     typesense_metrics
         .with_label_values(&[
             &cli_args.typesense_host,
@@ -85,6 +54,8 @@ pub(crate) async fn generate_metrics(
                 .parse()
                 .unwrap_or(0.0),
         );
+
+    // Disk metrics
     typesense_metrics
         .with_label_values(&[
             &cli_args.typesense_host,
@@ -99,6 +70,8 @@ pub(crate) async fn generate_metrics(
             "system_disk_used_bytes",
         ])
         .set(ts_metrics.system_disk_used_bytes.parse().unwrap_or(0.0));
+
+    // Memory metrics (including swap)
     typesense_metrics
         .with_label_values(&[
             &cli_args.typesense_host,
@@ -113,6 +86,22 @@ pub(crate) async fn generate_metrics(
             "system_memory_used_bytes",
         ])
         .set(ts_metrics.system_memory_used_bytes.parse().unwrap_or(0.0));
+    typesense_metrics
+        .with_label_values(&[
+            &cli_args.typesense_host,
+            &cli_args.typesense_port.to_string(),
+            "system_memory_total_swap_bytes",
+        ])
+        .set(ts_metrics.system_memory_total_swap_bytes.parse().unwrap_or(0.0));
+    typesense_metrics
+        .with_label_values(&[
+            &cli_args.typesense_host,
+            &cli_args.typesense_port.to_string(),
+            "system_memory_used_swap_bytes",
+        ])
+        .set(ts_metrics.system_memory_used_swap_bytes.parse().unwrap_or(0.0));
+
+    // Network metrics
     typesense_metrics
         .with_label_values(&[
             &cli_args.typesense_host,
@@ -132,6 +121,8 @@ pub(crate) async fn generate_metrics(
             "system_network_sent_bytes",
         ])
         .set(ts_metrics.system_network_sent_bytes.parse().unwrap_or(0.0));
+
+    // Typesense memory metrics
     typesense_metrics
         .with_label_values(&[
             &cli_args.typesense_host,
@@ -217,6 +208,7 @@ pub(crate) async fn generate_metrics(
                 .unwrap_or(0.0),
         );
 
+    // Stats metrics
     let typesense_stats = register_gauge_vec_with_registry!(
         "typesense_stats",
         "Data received through the stats api of typesense",
@@ -224,6 +216,15 @@ pub(crate) async fn generate_metrics(
         registry
     )
     .unwrap();
+
+    // Cache hit ratio (important for search performance monitoring)
+    typesense_stats
+        .with_label_values(&[
+            &cli_args.typesense_host,
+            &cli_args.typesense_port.to_string(),
+            "cache_hit_ratio",
+        ])
+        .set(ts_stats.cache_hit_ratio);
 
     typesense_stats
         .with_label_values(&[
@@ -303,6 +304,7 @@ pub(crate) async fn generate_metrics(
         ])
         .set(ts_stats.write_requests_per_second);
 
+    // Per-endpoint latency metrics
     let typesense_stats_latency_ms = register_gauge_vec_with_registry!(
         "typesense_stats_latency_ms",
         "Each endpoint latency in ms from stats api",
@@ -313,11 +315,12 @@ pub(crate) async fn generate_metrics(
 
     let typesense_stats_latency_ms_by_collection = register_gauge_vec_with_registry!(
         "typesense_stats_latency_ms_by_collection",
-        "Each endpoint latency in ms from stats api",
+        "Collection endpoint latency in ms from stats api",
         &["host", "port", "key", "method", "collection_name", "action"],
         registry
     )
     .unwrap();
+
     for (key, value) in ts_stats.latency_ms.iter() {
         typesense_stats_latency_ms
             .with_label_values(&[
@@ -327,29 +330,23 @@ pub(crate) async fn generate_metrics(
             ])
             .set(value.to_string().parse::<f64>().unwrap_or(0.0));
 
-        match parse_collection_action_line(key) {
-            Some((method, collection_name, action)) => {
-                println!("Method: {}", method);
-                println!("Collection Name: {}", collection_name);
-                println!("Action: {}", action);
-
-                typesense_stats_latency_ms_by_collection
-                    .with_label_values(&[
-                        &cli_args.typesense_host,
-                        &cli_args.typesense_port.to_string(),
-                        key,
-                        method.as_str(),
-                        collection_name.as_str(),
-                        action.as_str(),
-                    ])
-                    .set(value.to_string().parse::<f64>().unwrap_or(0.0));
-            }
-            None => {
-                println!("No match found");
-            }
+        // Only parse collection metrics for actual collection endpoints
+        if let Some((method, collection_name, action)) = parse_collection_action_line(key) {
+            typesense_stats_latency_ms_by_collection
+                .with_label_values(&[
+                    &cli_args.typesense_host,
+                    &cli_args.typesense_port.to_string(),
+                    key,
+                    method.as_str(),
+                    collection_name.as_str(),
+                    action.as_str(),
+                ])
+                .set(value.to_string().parse::<f64>().unwrap_or(0.0));
         }
+        // No else branch - silently skip non-collection endpoints
     }
 
+    // Per-endpoint request rate metrics
     let typesense_stats_requests_per_second = register_gauge_vec_with_registry!(
         "typesense_stats_requests_per_second",
         "Each endpoint rps from stats api",
@@ -360,7 +357,7 @@ pub(crate) async fn generate_metrics(
 
     let typesense_stats_requests_per_second_by_collection = register_gauge_vec_with_registry!(
         "typesense_stats_requests_per_second_by_collection",
-        "Each endpoint rps from stats api",
+        "Collection endpoint rps from stats api",
         &["host", "port", "key", "method", "collection_name", "action"],
         registry
     )
@@ -375,39 +372,70 @@ pub(crate) async fn generate_metrics(
             ])
             .set(value.to_string().parse::<f64>().unwrap_or(0.0));
 
-        match parse_collection_action_line(key) {
-            Some((method, collection_name, action)) => {
-                // println!("Method: {}", method);
-                // println!("Collection Name: {}", collection_name);
-                // println!("Action: {}", action);
-
-                typesense_stats_requests_per_second_by_collection
-                    .with_label_values(&[
-                        &cli_args.typesense_host,
-                        &cli_args.typesense_port.to_string(),
-                        key,
-                        method.as_str(),
-                        collection_name.as_str(),
-                        action.as_str(),
-                    ])
-                    .set(value.to_string().parse::<f64>().unwrap_or(0.0));
-            }
-            None => {
-                // println!("No match found");
-            }
+        // Only parse collection metrics for actual collection endpoints
+        if let Some((method, collection_name, action)) = parse_collection_action_line(key) {
+            typesense_stats_requests_per_second_by_collection
+                .with_label_values(&[
+                    &cli_args.typesense_host,
+                    &cli_args.typesense_port.to_string(),
+                    key,
+                    method.as_str(),
+                    collection_name.as_str(),
+                    action.as_str(),
+                ])
+                .set(value.to_string().parse::<f64>().unwrap_or(0.0));
         }
+        // No else branch - silently skip non-collection endpoints
     }
 
+    // Health status metric
+    let typesense_health = register_gauge_vec_with_registry!(
+        "typesense_health",
+        "Health status of Typesense instance (1 = healthy, 0 = unhealthy)",
+        &["host", "port"],
+        registry
+    )
+    .unwrap();
+
+    typesense_health
+        .with_label_values(&[
+            &cli_args.typesense_host,
+            &cli_args.typesense_port.to_string(),
+        ])
+        .set(if ts_health.ok { 1.0 } else { 0.0 });
+
+    // Raft state metric (for HA deployments)
+    let typesense_raft_state = register_gauge_vec_with_registry!(
+        "typesense_raft_state",
+        "Raft state of Typesense node (1 = leader, 4 = follower, 0 = other)",
+        &["host", "port"],
+        registry
+    )
+    .unwrap();
+
+    let state_value = match ts_debug.state {
+        1 => 1.0,
+        4 => 4.0,
+        _ => 0.0,
+    };
+
+    typesense_raft_state
+        .with_label_values(&[
+            &cli_args.typesense_host,
+            &cli_args.typesense_port.to_string(),
+        ])
+        .set(state_value);
+
+    // Encode and return
     let encoder = TextEncoder::new();
     let metric_families = registry.gather();
     let mut buffer = Vec::new();
     encoder.encode(&metric_families, &mut buffer).unwrap();
 
-    let metric_line = String::from_utf8(buffer).unwrap();
-
-    return metric_line;
+    String::from_utf8(buffer).unwrap()
 }
 
+/// Parse collection action endpoints like "GET /collections/products/documents/search"
 fn parse_collection_action_line(input: &str) -> Option<(String, String, String)> {
     let pattern = r"(\w+)\s+/collections/([^/]+)/([^/]+/[^/]+)";
     let re = Regex::new(pattern).unwrap();

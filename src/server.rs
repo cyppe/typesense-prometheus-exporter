@@ -3,12 +3,16 @@ use std::sync::Arc;
 use crate::prometheus_exp;
 use crate::{
     cli::CliArgs,
-    typesense::{metrics::get_typesense_metrics, stats::get_typesense_stats},
+    typesense::{
+        stats::get_typesense_stats,
+        metrics::get_typesense_metrics,
+        health::get_typesense_health,
+        debug::get_typesense_debug,
+    },
 };
 
 use axum::extract::State;
 use axum::{routing::get, Router};
-use futures::future;
 use tokio::signal;
 
 pub(crate) async fn start_metrics_server(args: CliArgs) {
@@ -59,18 +63,19 @@ async fn root() -> &'static str {
 }
 
 async fn metrics_route_handler(State(args): State<Arc<CliArgs>>) -> String {
-    let (metrics_data, stats_data) = future::join(
+    let (metrics_data, stats_data, health_data, debug_data) = tokio::join!(
         get_typesense_metrics(args.clone()),
         get_typesense_stats(args.clone()),
-    )
-    .await;
+        get_typesense_health(args.clone()),
+        get_typesense_debug(args.clone()),
+    );
 
-    let promdata = prometheus_exp::generate_metrics(
+    prometheus_exp::generate_metrics(
         metrics_data.unwrap().clone(),
         stats_data.unwrap().clone(),
+        health_data.unwrap().clone(),
+        debug_data.unwrap().clone(),
         args.clone(),
     )
-    .await;
-
-    return promdata;
+    .await
 }
